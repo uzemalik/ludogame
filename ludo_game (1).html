@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple Ludo — Offline (2/4 players) with Auto-play</title>
+  <style>
+    :root{ --cell:44px; --gap:6px }
+    *{box-sizing:border-box}
+    body{font-family:Inter, Arial, sans-serif; margin:0; padding:16px; display:flex; gap:18px; align-items:flex-start}
+    .board-wrap{width:760px}
+    .controls{width:340px}
+    h2{margin:6px 0}
+
+    /* Track shown as responsive grid (simplified visual) */
+    .track{display:grid; grid-template-columns:repeat(13, var(--cell)); grid-auto-rows:var(--cell); gap:var(--gap); width:calc(13*var(--cell) + 12*var(--gap)); background:#f6f6f6; padding:12px; border-radius:8px; border:1px solid #ddd}
+    .cell{width:var(--cell); height:var(--cell); background:#fff; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:11px; color:#333; position:relative}
+    .cell.track-index{color:#bbb}
+
+    .home-areas{display:flex; gap:8px; margin-top:10px}
+    .home-area{flex:1; background:#fff; padding:8px; border-radius:8px; border:1px solid #ddd; min-height:120px}
+    .home-title{font-size:13px; margin-bottom:6px}
+    .home-slots{display:flex; gap:6px; flex-wrap:wrap}
+    .slot{width:48px; height:48px; border-radius:6px; display:flex; align-items:center; justify-content:center; background:linear-gradient(#fafafa,#eee); border:1px dashed #eee}
+
+    .piece{width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; cursor:pointer}
+
+    .controls .btn{display:inline-block;padding:8px 12px;margin:6px 4px;cursor:pointer;border-radius:6px;border:1px solid #bbb;background:#fff}
+    .dice{font-size:20px;font-weight:700;padding:8px 12px}
+
+    .log{height:260px; overflow:auto; border:1px solid #eee; padding:8px; background:#fff}
+
+    .modal{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.35);}
+    .modal .card{background:#fff; padding:12px; border-radius:8px; width:320px}
+    .move-btn{display:block;width:100%;padding:8px;margin:6px 0;border-radius:6px;border:1px solid #ccc;background:#fafafa;text-align:left}
+
+    /* color helpers */
+    .red{background:#d33}
+    .green{background:#2a8}
+    .yellow{background:#e6b800}
+    .blue{background:#2471ff}
+
+    .summary{font-size:13px;color:#444;margin-top:8px}
+  </style>
+</head>
+<body>
+  <div class="board-wrap">
+    <h2>Simple Ludo Board</h2>
+    <div class="track" id="track"></div>
+    <div class="home-areas" id="homeAreas"></div>
+  </div>
+
+  <div class="controls">
+    <h2>Controls</h2>
+    <div>
+      <label>Players: </label>
+      <select id="playerCount"><option value="2">2 Players</option><option value="4" selected>4 Players</option></select>
+    </div>
+    <div style="margin-top:8px">
+      <label>Auto-play (tick players that should be AI):</label>
+      <div id="autoPlayers"></div>
+    </div>
+    <div style="margin-top:8px">
+      <button id="newGame" class="btn">New Game</button>
+      <button id="rollBtn" class="btn dice">Roll</button>
+      <span id="diceVal">-</span>
+    </div>
+
+    <div style="margin-top:8px">
+      <div>Turn: <strong id="turnDisplay">-</strong></div>
+      <div class="summary">Rules (simplified): roll a 6 to move a token out of home. Capture sends token back to home. Reach final home steps to finish a token.</div>
+    </div>
+
+    <h3>Log</h3>
+    <div id="log" class="log"></div>
+  </div>
+
+  <!-- move chooser modal -->
+  <div id="modal" style="display:none" class="modal"><div class="card" id="modalCard"></div></div>
+
+<script>
+// Simplified, stable Ludo implementation with clickable move chooser (no prompt)
+const COLORS = ['red','green','yellow','blue'];
+const START_INDEX = { red:0, green:13, yellow:26, blue:39 };
+const HOME_ENTRY = { red:51, green:12, yellow:25, blue:38 };
+const BOARD_SIZE = 52;
+const HOME_STEPS = 6;
+
+let state = {
+  players: 4,
+  auto: [false,false,false,false],
+  current: 0,
+  dice: null,
+  tokens: [], // tokens[player][tokenIndex] = { pos: null | number | {type:'home',steps:n,owner:p}, finished: bool }
+  running: false
+};
+
+const trackEl = document.getElementById('track');
+const homeAreasEl = document.getElementById('homeAreas');
+const logEl = document.getElementById('log');
+const diceValEl = document.getElementById('diceVal');
+const rollBtn = document.getElementById('rollBtn');
+const playerCountSel = document.getElementById('playerCount');
+const newGameBtn = document.getElementById('newGame');
+const autoPlayersEl = document.getElementById('autoPlayers');
+const turnDisplay = document.getElementById('turnDisplay');
+const modal = document.getElementById('modal');
+const modalCard = document.getElementById('modalCard');
+
+function log(msg){ const d = document.createElement('div'); d.textContent = `[${new Date().toLocaleTimeString()}] `+msg; logEl.prepend(d); }
+
+function buildTrack(){ trackEl.innerHTML = ''; for(let i=0;i<BOARD_SIZE;i++){ const c = document.createElement('div'); c.className='cell'; c.dataset.index = i; c.innerHTML = `<div class="track-index">${i}</div>`; trackEl.appendChild(c); } }
+
+function buildHomeAreas(){ homeAreasEl.innerHTML=''; for(let p=0;p<4;p++){
+  const area = document.createElement('div'); area.className='home-area'; area.dataset.player = p;
+  const title = document.createElement('div'); title.className='home-title'; title.textContent = COLORS[p]; title.style.color = COLORS[p];
+  const slots = document.createElement('div'); slots.className='home-slots'; slots.dataset.player = p;
+  // 4 home slots
+  for(let s=0;s<4;s++){ const slot = document.createElement('div'); slot.className='slot'; slot.dataset.token = s; slots.appendChild(slot); }
+  // home-track (steps) display
+  const homeTrack = document.createElement('div'); homeTrack.style.marginTop='8px'; homeTrack.innerHTML = '<div style="font-size:12px;margin-bottom:6px">Home stretch</div>';
+  const stepsWrap = document.createElement('div'); stepsWrap.style.display='flex'; stepsWrap.style.gap='6px'; for(let st=1;st<=HOME_STEPS;st++){ const sp = document.createElement('div'); sp.className='slot'; sp.dataset.step = st; sp.style.width='34px'; sp.style.height='34px'; stepsWrap.appendChild(sp); }
+  homeTrack.appendChild(stepsWrap);
+
+  // finished area
+  const fin = document.createElement('div'); fin.style.marginTop='8px'; fin.innerHTML = '<div style="font-size:12px;margin-bottom:6px">Finished</div>';
+  const finWrap = document.createElement('div'); finWrap.style.display='flex'; finWrap.style.gap='6px'; for(let f=0;f<4;f++){ const fsp = document.createElement('div'); fsp.className='slot'; fsp.style.width='34px'; fsp.style.height='34px'; finWrap.appendChild(fsp); }
+  fin.appendChild(finWrap);
+
+  area.appendChild(title); area.appendChild(slots); area.appendChild(homeTrack); area.appendChild(fin);
+  homeAreasEl.appendChild(area);
+ }
+}
+
+function initState(){
+  state.players = parseInt(playerCountSel.value);
+  state.current = 0; state.dice = null; state.running = true;
+  state.tokens = [];
+  for(let p=0;p<4;p++){
+    const arr=[]; for(let t=0;t<4;t++) arr.push({pos:null, finished:false}); state.tokens.push(arr);
+  }
+  diceValEl.textContent='-';
+  render();
+}
+
+function render(){
+  // clear track cells
+  for(let i=0;i<BOARD_SIZE;i++){ const cell = trackEl.querySelector(`.cell[data-index='${i}']`); if(cell) cell.innerHTML = `<div class="track-index">${i}</div>`; }
+  // clear home slots & tracks & finished
+  Array.from(homeAreasEl.children).forEach((area, p)=>{
+    const slots = area.querySelectorAll('.home-slots .slot'); slots.forEach(s=>s.innerHTML='');
+    const steps = area.querySelectorAll('[data-step]'); steps.forEach(s=>s.innerHTML='');
+    const fins = area.querySelectorAll('> div:nth-child(4) .slot'); fins.forEach(s=>s.innerHTML='');
+  });
+
+  // place pieces
+  for(let p=0;p<state.players;p++){
+    for(let t=0;t<4;t++){
+      const tok = state.tokens[p][t];
+      const piece = document.createElement('div'); piece.className='piece '+COLORS[p]; piece.textContent = t+1; piece.dataset.player=p; piece.dataset.token=t;
+      // click handler to allow selecting token when it's player's turn and not auto
+      piece.addEventListener('click', (e)=>{ onPieceClick(parseInt(e.currentTarget.dataset.player), parseInt(e.currentTarget.dataset.token)); });
+
+      if(tok.finished){
+        // place into finished area
+        const finWrap = homeAreasEl.children[p].querySelector('> div:nth-child(4) div'); const free = Array.from(finWrap.children).find(c=>c.innerHTML===''); if(free) free.appendChild(piece);
+        continue;
+      }
+
+      if(tok.pos === null){
+        // home slot
+        const homeSlots = homeAreasEl.children[p].querySelectorAll('.home-slots .slot'); const slot = homeSlots[t]; if(slot) slot.appendChild(piece);
+        continue;
+      }
+
+      if(typeof tok.pos === 'object' && tok.pos.type === 'home'){
+        // home stretch
+        const stepsWrap = homeAreasEl.children[p].querySelectorAll('[data-step]'); const stepCell = Array.from(stepsWrap).find(s=>parseInt(s.dataset.step)===tok.pos.steps);
+        if(stepCell) stepCell.appendChild(piece);
+        continue;
+      }
+
+      // normal track
+      const cell = trackEl.querySelector(`.cell[data-index='${tok.pos}']`);
+      if(cell) cell.appendChild(piece);
+    }
+  }
+
+  turnDisplay.textContent = COLORS[state.current] + (state.auto[state.current] ? ' (auto)' : '');
+}
+
+function rollDice(){ const v = Math.floor(Math.random()*6)+1; state.dice=v; diceValEl.textContent=v; log(`${COLORS[state.current]} rolled ${v}`); return v; }
+
+function getValidMoves(player, dice){
+  const moves=[]; const toks = state.tokens[player];
+  for(let i=0;i<4;i++){
+    const tok = toks[i]; if(tok.finished) continue;
+    if(tok.pos===null){ if(dice===6) moves.push({token:i, type:'out'}); }
+    else if(typeof tok.pos === 'number'){
+      const entry = HOME_ENTRY[COLORS[player]];
+      const distToEntry = (entry - tok.pos + BOARD_SIZE) % BOARD_SIZE;
+      if(dice > distToEntry){
+        const steps = dice - distToEntry;
+        if(steps <= HOME_STEPS) moves.push({token:i, type:'home', steps:steps});
+      } else {
+        moves.push({token:i, type:'move', to: (tok.pos + dice) % BOARD_SIZE});
+      }
+    } else if(typeof tok.pos === 'object' && tok.pos.type === 'home'){
+      const newSteps = tok.pos.steps + dice; if(newSteps <= HOME_STEPS) moves.push({token:i, type:'home', steps:newSteps});
+    }
+  }
+  return moves;
+}
+
+function applyMove(player, move){
+  const tok = state.tokens[player][move.token];
+  if(move.type === 'out'){
+    tok.pos = START_INDEX[COLORS[player]]; log(`${COLORS[player]} token ${move.token+1} moved out to ${tok.pos}`);
+    captureAt(player, tok.pos);
+    return;
+  }
+  if(move.type === 'move'){
+    tok.pos = move.to; log(`${COLORS[player]} token ${move.token+1} moved to ${tok.pos}`); captureAt(player, tok.pos); return;
+  }
+  if(move.type === 'home'){
+    tok.pos = {type:'home', steps: move.steps}; log(`${COLORS[player]} token ${move.token+1} moved into home steps ${move.steps}`);
+    if(move.steps === HOME_STEPS){ tok.finished = true; tok.pos = null; log(`${COLORS[player]} token ${move.token+1} finished!`); }
+    return;
+  }
+}
+
+function captureAt(player, pos){
+  for(let p=0;p<state.players;p++){ if(p===player) continue; for(let t=0;t<4;t++){ const o = state.tokens[p][t]; if(typeof o.pos === 'number' && o.pos === pos){ o.pos = null; log(`${COLORS[player]} captured ${COLORS[p]}'s token ${t+1}`); } }}
+}
+
+function nextTurn(){
+  // rotate to next active player
+  for(let i=1;i<=4;i++){ const cand = (state.current + i) % 4; if(cand < state.players){ state.current = cand; break; } }
+  render();
+  // if auto, trigger auto turn after small delay
+  if(state.auto[state.current]){ setTimeout(()=> autoPlayTurn(), 300); }
+}
+
+function autoPlayTurn(){ if(!state.running) return; const v = rollDice(); const moves = getValidMoves(state.current, v); if(moves.length===0){ log(`${COLORS[state.current]} has no moves`); if(v!==6) nextTurn(); else nextTurn(); return; }
+  // pick best move: prefer capture, then home progress, then longest advance
+  let chosen = moves[0];
+  // prefer capture
+  for(const m of moves){ if(m.type==='move'){ for(let p=0;p<state.players;p++){ if(p===state.current) continue; for(let t=0;t<4;t++){ const o = state.tokens[p][t]; if(o.pos === m.to){ chosen = m; break; } } } } }
+  // prefer finishing/home
+  for(const m of moves){ if(m.type==='home') { chosen = m; break; } }
+  applyMove(state.current, chosen); render(); if(state.dice===6){ setTimeout(()=> autoPlayTurn(), 350); } else { nextTurn(); } }
+
+// UI helpers
+function showMoveChooser(moves, onChoose){ modalCard.innerHTML = '<div style="font-weight:700;margin-bottom:8px">Choose move</div>'; moves.forEach((m,idx)=>{
+  const btn = document.createElement('button'); btn.className='move-btn'; let txt=''; if(m.type==='out') txt = `Token ${m.token+1}: Out to start`;
+  else if(m.type==='move') txt = `Token ${m.token+1}: Move to ${m.to}`;
+  else txt = `Token ${m.token+1}: Home steps ${m.steps}`;
+  btn.textContent = txt; btn.addEventListener('click', ()=>{ modal.style.display='none'; onChoose(m); }); modalCard.appendChild(btn);
+}); const cancel = document.createElement('button'); cancel.className='move-btn'; cancel.textContent='Cancel'; cancel.addEventListener('click', ()=>{ modal.style.display='none'; }); modalCard.appendChild(cancel); modal.style.display='flex'; }
+
+function onPieceClick(player, token){ // only allow selecting if it's this player's turn and not auto
+  if(player !== state.current) return; if(state.auto[player]) return; // ignore clicks for auto players
+  // only allow selection after dice rolled
+  if(state.dice === null) return; const moves = getValidMoves(player, state.dice).filter(m=>m.token===token); if(moves.length===0) { log('No moves available for that token'); return; }
+  if(moves.length===1) { applyMove(player, moves[0]); render(); if(state.dice===6) { state.dice=null; diceValEl.textContent='-'; /* same player's turn - allow next roll */ } else { state.dice=null; diceValEl.textContent='-'; nextTurn(); } return; }
+  // multiple choices for the same token
+  showMoveChooser(moves, (chosen)=>{ applyMove(player, chosen); render(); if(state.dice===6){ state.dice=null; diceValEl.textContent='-'; } else { state.dice=null; diceValEl.textContent='-'; nextTurn(); } });
+}
+
+rollBtn.addEventListener('click', ()=>{
+  if(!state.running) return; if(state.auto[state.current]) return; // auto players roll themselves
+  const v = rollDice(); const moves = getValidMoves(state.current, v);
+  if(moves.length===0){ log(`${COLORS[state.current]} has no valid moves`); state.dice=null; diceValEl.textContent='-'; if(v!==6) nextTurn(); else nextTurn(); return; }
+  if(moves.length===1){ applyMove(state.current, moves[0]); render(); if(v===6){ state.dice=null; diceValEl.textContent='-'; /* allow the same player to roll again manually */ } else { state.dice=null; diceValEl.textContent='-'; nextTurn(); } return; }
+  // multiple moves -> present chooser
+  showMoveChooser(moves, (chosen)=>{ applyMove(state.current, chosen); render(); if(v===6){ state.dice=null; diceValEl.textContent='-'; } else { state.dice=null; diceValEl.textContent='-'; nextTurn(); } });
+});
+
+function buildAutoList(){ autoPlayersEl.innerHTML=''; for(let p=0;p<4;p++){ const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='8px'; const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.player = p; cb.disabled = (p >= state.players); cb.checked = state.auto[p] || false; cb.addEventListener('change', (e)=>{ state.auto[parseInt(e.target.dataset.player)] = e.target.checked; }); const label = document.createElement('label'); label.textContent = COLORS[p]; label.style.color = COLORS[p]; row.appendChild(cb); row.appendChild(label); autoPlayersEl.appendChild(row); } }
+
+newGameBtn.addEventListener('click', ()=>{ state.players = parseInt(playerCountSel.value); // reset auto flags for disabled players
+  for(let i=0;i<4;i++) if(i >= state.players) state.auto[i] = false;
+  buildAutoList(); initState(); log('New game: '+state.players+' players'); // if first player is auto, trigger
+  if(state.auto[state.current]) setTimeout(()=> autoPlayTurn(), 300);
+});
+
+playerCountSel.addEventListener('change', ()=>{ buildAutoList(); });
+
+// initial build
+buildTrack(); buildHomeAreas(); buildAutoList(); initState(); log('Ready — click New Game to start playing.');
+</script>
+</body>
+</html>
